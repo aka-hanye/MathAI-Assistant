@@ -4,6 +4,7 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#2563eb"><title>数学 AI 助手</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
 <script>window.MathJax={tex:{inlineMath:[['$','$'],['\\(','\\)']],displayMath:[['$$','$$'],['\\[','\\]']],processEscapes:true},svg:{fontCache:'global'}};</script>
 <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
@@ -22,10 +23,29 @@
 const el=id=>document.getElementById(id);let photoData=null,photoName='';
 el('photo').onchange=e=>{const f=e.target.files[0];if(!f)return;if(f.size>10*1024*1024){el('status').textContent='图片超过 10MB，请压缩后重试。';return;}const reader=new FileReader();reader.onload=()=>{photoData=reader.result;photoName=f.name;el('thumb').src=photoData;el('fname').textContent=photoName;el('preview').classList.remove('hidden');};reader.readAsDataURL(f);};
 el('remove').onclick=()=>{photoData=null;photoName='';el('photo').value='';el('preview').classList.add('hidden');};
-function add(text,role){const d=document.createElement('div');d.className='msg '+role;if(role==='assistant'){d.innerHTML=DOMPurify.sanitize(marked.parse(text));el('chat').append(d);if(window.MathJax?.typesetPromise)MathJax.typesetPromise([d]);}else{d.textContent=text;el('chat').append(d);}el('chat').scrollTop=el('chat').scrollHeight;return d;}
+async function renderMathGraphs(root){
+ if(!window.Plotly)return;
+ const blocks=root.querySelectorAll('pre code.language-math-graph,pre code.language-plot');
+ for(const code of blocks){
+  const pre=code.parentElement;
+  try{
+   const spec=JSON.parse(code.textContent);
+   if(!Array.isArray(spec.data)||!spec.data.length)throw new Error('图像数据为空');
+   const chart=document.createElement('div');
+   chart.style.cssText='width:100%;min-height:320px;margin:14px 0;overflow:hidden';
+   pre.replaceWith(chart);
+   const layout=Object.assign({autosize:true,margin:{l:48,r:18,t:42,b:48},paper_bgcolor:'#fff',plot_bgcolor:'#fff',xaxis:{title:'x',zeroline:true,gridcolor:'#e5eaf2'},yaxis:{title:'y',zeroline:true,gridcolor:'#e5eaf2'},legend:{orientation:'h'},font:{family:'system-ui,sans-serif',color:'#172033'}},spec.layout||{});
+   await Plotly.newPlot(chart,spec.data,layout,{responsive:true,displaylogo:false,modeBarButtonsToRemove:['lasso2d','select2d']});
+  }catch(e){
+   const note=document.createElement('div');note.textContent='图像暂时无法绘制：'+e.message;
+   note.style.cssText='padding:10px;color:#b45309;background:#fffbeb;border-radius:8px';pre.replaceWith(note);
+  }
+ }
+}
+function add(text,role){const d=document.createElement('div');d.className='msg '+role;if(role==='assistant'){d.innerHTML=DOMPurify.sanitize(marked.parse(text));el('chat').append(d);renderMathGraphs(d);if(window.MathJax?.typesetPromise)MathJax.typesetPromise([d]);}else{d.textContent=text;el('chat').append(d);}el('chat').scrollTop=el('chat').scrollHeight;return d;}
 el('send').onclick=async()=>{const q=el('question').value.trim();if(!q&&!photoData){el('status').textContent='请输入题目或上传图片。';return;}
 add((q||'请识别并解答图片中的数学题。')+(photoName?' [图片：'+photoName+']':''),'user');el('question').value='';
-const parts=[{type:'text',text:'请用简体中文解答数学题。先准确识别题目，再给出题意分析、解题思路、逐步计算、最终答案和易错点。公式使用 LaTeX，行内用 $...$，独立公式用 $$...$$。不要跳过关键步骤；若图片模糊或题意不清，先说明。\n'+(q||'请解答图片中的题目。')}];if(photoData)parts.push({type:'image_url',image_url:{url:photoData}});
+const parts=[{type:'text',text:'请用简体中文解答数学题。先准确识别题目，再给出题意分析、解题思路、逐步计算、最终答案和易错点。公式使用 LaTeX，行内用 $...$，独立公式用 $...$。如果题目涉及函数图像、坐标系、曲线或几何示意图，尽量绘制：在答案适当位置单独输出 ```math-graph 代码块，内部必须是合法 JSON，结构为 {"data":[{"x":[-3,-2,-1,0,1,2,3],"y":[9,4,1,0,1,4,9],"type":"scatter","mode":"lines","name":"y=x²"}],"layout":{"title":"函数图像","xaxis":{"title":"x"},"yaxis":{"title":"y"}}}。曲线用足够密集的采样点；多条曲线放在 data 数组中；离散点用 mode=markers；曲线用 mode=lines；几何示意图可用 scatter 轨迹。JSON 中不要注释或额外文字。若不需要图像则不要生成图像代码块。若图片模糊或题意不清，先说明。\n'+(q||'请解答图片中的题目。')}];if(photoData)parts.push({type:'image_url',image_url:{url:photoData}});
 const pending=add('正在识别题目并生成解答，请稍候……','assistant');el('send').disabled=true;el('status').textContent='正在连接数学模型……';
 try{const response=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:[{role:'system',content:'你是一位严谨耐心的中文数学教师。优先保证答案正确，分步推导，清楚区分条件、过程和结论。若无法辨认图片内容，不要猜测。'},{role:'user',content:parts}]})});const data=await response.json();if(!response.ok)throw new Error(data.error||'HTTP '+response.status);const answer=data.answer;if(!answer)throw new Error('模型没有返回内容');pending.remove();add(answer,'assistant');el('status').textContent='回答完成。';}
 catch(err){pending.remove();add('请求失败：'+err.message+'\n请检查 API Key、网络或稍后重试。','assistant');el('status').textContent='请求失败。';}
